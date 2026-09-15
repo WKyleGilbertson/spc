@@ -15,28 +15,31 @@
 
 #include "spc.h"
 
-#define DRIVER_NAME            "spc"
-#define DEVICE_BASE            0x41600000
-#define DEVICE_SIZE            0x1000
+#define DRIVER_NAME "spc"
+#define DEVICE_BASE 0x41600000
+#define DEVICE_SIZE 0x1000
 #define CLEAR_INTERRUPT_OFFSET 0x80C
-#define CLEAR_INTERRUPT_VALUE  0x80000000
+#define CLEAR_INTERRUPT_VALUE 0x80000000
 
 // Channel register stride in spc_ctrlmux (relative to 0x41600000)
-#define CH_STRIDE              0x80 // paddr[9:7] = 128 bytes per channel
-#define OFF_IN                 0x08
-#define OFF_QN                 0x0C
-#define OFF_IE                 0x10
-#define OFF_QE                 0x14
-#define OFF_IP                 0x18
-#define OFF_QP                 0x1C
-#define OFF_IL                 0x20
-#define OFF_QL                 0x24
-#define OFF_CARR_PHASE         0x28
-#define OFF_EPOCH_INFO         0x30 // [15:0] = epoch_idx, [17:16] = epoch_cnt, [31:24] = data_ready
+/*
+#define CH_STRIDE 0x80 // paddr[9:7] = 128 bytes per channel
+#define OFF_IN 0x08
+#define OFF_QN 0x0C
+#define OFF_IE 0x10
+#define OFF_QE 0x14
+#define OFF_IP 0x18
+#define OFF_QP 0x1C
+#define OFF_IL 0x20
+#define OFF_QL 0x24
+#define OFF_CARR_PHASE 0x28
+#define OFF_EPOCH_INFO 0x30 // [15:0] = epoch_idx, [17:16] = epoch_cnt, [31:24] = data_ready
+*/
 
-#define FIFO_FRAME_COUNT       64
+#define FIFO_FRAME_COUNT 64
 
-struct spc_dev {
+struct spc_dev
+{
     void __iomem *base;
     int irq;
     struct miscdevice misc;
@@ -58,22 +61,23 @@ static irqreturn_t spc_isr(int irq, void *dev_id)
     frame.system_epoch = dev->epoch_counter++;
 
     // Unrolled harvest across APB bus
-    for (ch = 0; ch < SPC_NUM_CHANNELS; ch++) {
+    for (ch = 0; ch < SPC_NUM_CHANNELS; ch++)
+    {
         void __iomem *ch_base = dev->base + (ch * CH_STRIDE);
-        frame.ch[ch].in            = (int32_t)ioread32(ch_base + OFF_IN);
-        frame.ch[ch].qn            = (int32_t)ioread32(ch_base + OFF_QN);
-        frame.ch[ch].ie            = (int32_t)ioread32(ch_base + OFF_IE);
-        frame.ch[ch].qe            = (int32_t)ioread32(ch_base + OFF_QE);
-        frame.ch[ch].ip            = (int32_t)ioread32(ch_base + OFF_IP);
-        frame.ch[ch].qp            = (int32_t)ioread32(ch_base + OFF_QP);
-        frame.ch[ch].il            = (int32_t)ioread32(ch_base + OFF_IL);
-        frame.ch[ch].ql            = (int32_t)ioread32(ch_base + OFF_QL);
+        frame.ch[ch].in = (int32_t)ioread32(ch_base + OFF_IN);
+        frame.ch[ch].qn = (int32_t)ioread32(ch_base + OFF_QN);
+        frame.ch[ch].ie = (int32_t)ioread32(ch_base + OFF_IE);
+        frame.ch[ch].qe = (int32_t)ioread32(ch_base + OFF_QE);
+        frame.ch[ch].ip = (int32_t)ioread32(ch_base + OFF_IP);
+        frame.ch[ch].qp = (int32_t)ioread32(ch_base + OFF_QP);
+        frame.ch[ch].il = (int32_t)ioread32(ch_base + OFF_IL);
+        frame.ch[ch].ql = (int32_t)ioread32(ch_base + OFF_QL);
 
-        uint32_t epoch_info        = ioread32(ch_base + OFF_EPOCH_INFO);
-        frame.ch[ch].epoch_idx     = (uint16_t)(epoch_info & 0xFFFF);
-        frame.ch[ch].epoch_cnt     = (uint8_t)((epoch_info >> 16) & 0x03);
+        uint32_t epoch_info = ioread32(ch_base + OFF_EPOCH_INFO);
+        frame.ch[ch].epoch_idx = (uint16_t)(epoch_info & 0xFFFF);
+        frame.ch[ch].epoch_cnt = (uint8_t)((epoch_info >> 16) & 0x03);
         frame.ch[ch].carrier_phase = ioread32(ch_base + OFF_CARR_PHASE);
-        frame.ch[ch].data_ready    = 1;
+        frame.ch[ch].data_ready = 1;
     }
 
     // Acknowledge interrupt in FPGA fabric
@@ -86,6 +90,53 @@ static irqreturn_t spc_isr(int irq, void *dev_id)
     wake_up_interruptible(&dev->read_queue);
 
     return IRQ_HANDLED;
+}
+
+static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    struct spc_dev *dev = g_spc;
+    channel_config_t cfg;
+    channel_nco_update_t upd;
+    void __iomem *ch_base;
+    int i;
+
+    switch (cmd)
+    {
+    case SPC_IOC_CONFIG_CH:
+        if (copy_from_user(&cfg, (void __user *)arg, sizeof(cfg)))
+            return -EFAULT;
+        ch_base = dev->base + (cfg.channel_idx * CH_STRIDE);
+
+        kfifo_reset(&dev->fifo);
+        dev->epoch_counter = 0;
+
+        // CDC WORKAROUND: Burst-write to stretch the APB strobe pulse
+        // wide enough for the 16.368 MHz sclk domain to catch it!
+        for (i = 0; i < 16; i++)
+        {
+            iowrite32(((cfg.spacing & 0x3F) << 2) | (cfg.nms & 0x3), ch_base + 0x00);
+            iowrite32(cfg.carr_freq, ch_base + 0x04);
+            iowrite32(cfg.code_freq, ch_base + 0x08);
+            iowrite32(((cfg.g2_seed & 0x3FF) << 20) |
+                          ((cfg.g1_seed & 0x3FF) << 10) |
+                          (cfg.code_phase & 0x3FF),
+                      ch_base + 0x0C);
+        }
+        return 0;
+
+    case SPC_IOC_UPDATE_NCO:
+        if (copy_from_user(&upd, (void __user *)arg, sizeof(upd)))
+            return -EFAULT;
+        ch_base = dev->base + (upd.channel_idx * CH_STRIDE);
+
+        // Clean, single-shot NCO updates (Gateware CDC handles the rest)
+        iowrite32(upd.carr_freq, ch_base + 0x04);
+        iowrite32(upd.code_freq, ch_base + 0x08);
+        return 0;
+
+    default:
+        return -ENOTTY;
+    }
 }
 
 // File Operations
@@ -142,11 +193,12 @@ static int spc_mmap(struct file *file, struct vm_area_struct *vma)
 }
 
 static const struct file_operations spc_fops = {
-    .owner   = THIS_MODULE,
-    .read    = spc_read,
-    .poll    = spc_poll,
-    .mmap    = spc_mmap,
-    .llseek  = noop_llseek,
+    .owner = THIS_MODULE,
+    .read = spc_read,
+    .poll = spc_poll,
+    .unlocked_ioctl = spc_ioctl,
+    .mmap = spc_mmap,
+    .llseek = noop_llseek,
 };
 
 static int spc_probe(struct platform_device *pdev)
@@ -172,15 +224,16 @@ static int spc_probe(struct platform_device *pdev)
     dev->epoch_counter = 0;
 
     dev->misc.minor = MISC_DYNAMIC_MINOR;
-    dev->misc.name  = DRIVER_NAME;
-    dev->misc.fops  = &spc_fops;
+    dev->misc.name = DRIVER_NAME;
+    dev->misc.fops = &spc_fops;
 
     ret = misc_register(&dev->misc);
     if (ret)
         return ret;
 
     ret = devm_request_irq(&pdev->dev, dev->irq, spc_isr, 0, DRIVER_NAME, dev);
-    if (ret) {
+    if (ret)
+    {
         misc_deregister(&dev->misc);
         return ret;
     }
@@ -199,16 +252,15 @@ static void spc_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id spc_of_match[] = {
-    { .compatible = "microchip,spc" },
-    { /* sentinel */ }
-};
+    {.compatible = "microchip,spc"},
+    {/* sentinel */}};
 MODULE_DEVICE_TABLE(of, spc_of_match);
 
 static struct platform_driver spc_driver = {
-    .probe  = spc_probe,
+    .probe = spc_probe,
     .remove = spc_remove,
     .driver = {
-        .name           = DRIVER_NAME,
+        .name = DRIVER_NAME,
         .of_match_table = spc_of_match,
     },
 };

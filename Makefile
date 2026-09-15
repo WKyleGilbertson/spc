@@ -1,5 +1,6 @@
 KER ?= /home/beagle/lab/kernel/BeagleV-Fire-ubuntu/linux/
 MODULE_DIR := $(shell pwd)
+KVER := $(shell uname -r)
 
 # User-space compiler settings
 CC := gcc
@@ -32,6 +33,15 @@ spc_reader: spc_reader.c spc.h
 
 arm_ch0: arm_ch0.c spc.h
 	$(CC) $(CFLAGS) arm_ch0.c -o arm_ch0
+
+install: modules
+	@echo "Installing spc module to /lib/modules/$(KVER)/extra/..."
+	-sudo rmmod spc 2>/dev/null || true
+	sudo mkdir -p /lib/modules/$(KVER)/extra/
+	sudo cp spc.ko /lib/modules/$(KVER)/extra/
+	sudo depmod -a
+	sudo modprobe spc
+	@echo "spc module successfully installed and loaded!"
 
 clean:
 	# Clean kernel build artifacts

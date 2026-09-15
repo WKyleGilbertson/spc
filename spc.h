@@ -11,6 +11,18 @@
 
 #define SPC_NUM_CHANNELS 8
 
+#define CH_STRIDE              0x80 
+#define OFF_IN                 0x10
+#define OFF_QN                 0x14
+#define OFF_IE                 0x18
+#define OFF_QE                 0x1C
+#define OFF_IP                 0x20
+#define OFF_QP                 0x24
+#define OFF_IL                 0x28
+#define OFF_QL                 0x2C
+#define OFF_EPOCH_INFO         0x30
+#define OFF_CARR_PHASE         0x34
+
 // =============================================================================
 // 1. Ingest Telemetry (Hardware -> Software via read())
 // =============================================================================
@@ -62,13 +74,13 @@ typedef struct {
     uint16_t g1_seed;          // 10-bit G1 LFSR seed
     uint16_t g2_seed;          // 10-bit G2 LFSR seed
     uint16_t code_phase;       // Initial integer chip phase (0 to 1022)
-} channel_config_t;
+} __attribute__((packed)) channel_config_t;
 
 typedef struct {
     uint8_t  channel_idx;
     uint32_t carr_freq;
     uint32_t code_freq;
-} channel_nco_update_t;
+} __attribute__((packed)) channel_nco_update_t;
 
 // =============================================================================
 // 3. Timebase & PPS Steering (Software -> Hardware)
@@ -79,7 +91,7 @@ typedef struct {
     uint32_t pulse_width;      // High time in cycles (default 327 = 20 us)
     uint32_t jam_target_val;   // Phase counter target for coarse alignment
     uint8_t  trigger_jam;      // 1 = Strobe instantaneous jam-sync
-} pps_config_t;
+} __attribute__((packed)) pps_config_t;
 
 // =============================================================================
 // 4. IOCTL Interface Definitions
