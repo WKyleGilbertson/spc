@@ -21,21 +21,6 @@
 #define CLEAR_INTERRUPT_OFFSET 0x80C
 #define CLEAR_INTERRUPT_VALUE 0x80000000
 
-// Channel register stride in spc_ctrlmux (relative to 0x41600000)
-/*
-#define CH_STRIDE 0x80 // paddr[9:7] = 128 bytes per channel
-#define OFF_IN 0x08
-#define OFF_QN 0x0C
-#define OFF_IE 0x10
-#define OFF_QE 0x14
-#define OFF_IP 0x18
-#define OFF_QP 0x1C
-#define OFF_IL 0x20
-#define OFF_QL 0x24
-#define OFF_CARR_PHASE 0x28
-#define OFF_EPOCH_INFO 0x30 // [15:0] = epoch_idx, [17:16] = epoch_cnt, [31:24] = data_ready
-*/
-
 #define FIFO_FRAME_COUNT 64
 
 struct spc_dev
@@ -56,6 +41,7 @@ static irqreturn_t spc_isr(int irq, void *dev_id)
 {
     struct spc_dev *dev = dev_id;
     struct spc_epoch_data frame;
+    unsigned long flags;
     int ch;
 
     frame.system_epoch = dev->epoch_counter++;
@@ -73,18 +59,25 @@ static irqreturn_t spc_isr(int irq, void *dev_id)
         frame.ch[ch].il = (int32_t)ioread32(ch_base + OFF_IL);
         frame.ch[ch].ql = (int32_t)ioread32(ch_base + OFF_QL);
 
-        uint32_t epoch_info = ioread32(ch_base + OFF_EPOCH_INFO);
+uint32_t epoch_info = ioread32(ch_base + OFF_EPOCH_INFO);
         frame.ch[ch].epoch_idx = (uint16_t)(epoch_info & 0xFFFF);
         frame.ch[ch].epoch_cnt = (uint8_t)((epoch_info >> 16) & 0x03);
         frame.ch[ch].carrier_phase = ioread32(ch_base + OFF_CARR_PHASE);
-        frame.ch[ch].data_ready = 1;
+        frame.ch[ch].data_ready = (uint8_t)((epoch_info >> 24) & 0xFF);
     }
 
     // Acknowledge interrupt in FPGA fabric
     iowrite32(CLEAR_INTERRUPT_VALUE, dev->base + CLEAR_INTERRUPT_OFFSET);
 
-    // Push into lock-free kfifo
+    // Push into kfifo with spinlock protection (overwrite oldest if full)
+    spin_lock_irqsave(&dev->fifo_lock, flags);
+    if (kfifo_is_full(&dev->fifo)) {
+        struct spc_epoch_data dummy;
+        int ret = kfifo_get(&dev->fifo, &dummy);
+        (void)ret; // Silence warn_unused_result properly
+    }
     kfifo_put(&dev->fifo, frame);
+    spin_unlock_irqrestore(&dev->fifo_lock, flags);
 
     // Wake user-space daemon
     wake_up_interruptible(&dev->read_queue);
@@ -98,7 +91,6 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     channel_config_t cfg;
     channel_nco_update_t upd;
     void __iomem *ch_base;
-    int i;
 
     switch (cmd)
     {
@@ -107,21 +99,13 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             return -EFAULT;
         ch_base = dev->base + (cfg.channel_idx * CH_STRIDE);
 
-        kfifo_reset(&dev->fifo);
-        dev->epoch_counter = 0;
-
-        // CDC WORKAROUND: Burst-write to stretch the APB strobe pulse
-        // wide enough for the 16.368 MHz sclk domain to catch it!
-        for (i = 0; i < 16; i++)
-        {
-            iowrite32(((cfg.spacing & 0x3F) << 2) | (cfg.nms & 0x3), ch_base + 0x00);
-            iowrite32(cfg.carr_freq, ch_base + 0x04);
-            iowrite32(cfg.code_freq, ch_base + 0x08);
-            iowrite32(((cfg.g2_seed & 0x3FF) << 20) |
-                          ((cfg.g1_seed & 0x3FF) << 10) |
-                          (cfg.code_phase & 0x3FF),
-                      ch_base + 0x0C);
-        }
+        iowrite32(((cfg.spacing & 0x3F) << 2) | (cfg.nms & 0x3), ch_base + 0x00);
+        iowrite32(cfg.carr_freq, ch_base + 0x04);
+        iowrite32(cfg.code_freq, ch_base + 0x08);
+        iowrite32(((cfg.g2_seed & 0x3FF) << 20) |
+                      ((cfg.g1_seed & 0x3FF) << 10) |
+                      (cfg.code_phase & 0x3FF),
+                  ch_base + 0x0C);
         return 0;
 
     case SPC_IOC_UPDATE_NCO:
@@ -129,7 +113,6 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             return -EFAULT;
         ch_base = dev->base + (upd.channel_idx * CH_STRIDE);
 
-        // Clean, single-shot NCO updates (Gateware CDC handles the rest)
         iowrite32(upd.carr_freq, ch_base + 0x04);
         iowrite32(upd.code_freq, ch_base + 0x08);
         return 0;
@@ -139,11 +122,23 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     }
 }
 
-// File Operations
+static int spc_open(struct inode *inode, struct file *file)
+{
+    struct spc_dev *dev = g_spc;
+    unsigned long flags;
+
+    spin_lock_irqsave(&dev->fifo_lock, flags);
+    kfifo_reset(&dev->fifo);
+    spin_unlock_irqrestore(&dev->fifo_lock, flags);
+
+    return 0;
+}
+
 static ssize_t spc_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
     struct spc_dev *dev = g_spc;
     struct spc_epoch_data frame;
+    unsigned long flags;
     int ret;
 
     if (count < sizeof(struct spc_epoch_data))
@@ -153,7 +148,10 @@ static ssize_t spc_read(struct file *file, char __user *buf, size_t count, loff_
     if (ret)
         return ret;
 
+    spin_lock_irqsave(&dev->fifo_lock, flags);
     ret = kfifo_get(&dev->fifo, &frame);
+    spin_unlock_irqrestore(&dev->fifo_lock, flags);
+
     if (!ret)
         return -EAGAIN;
 
@@ -194,6 +192,7 @@ static int spc_mmap(struct file *file, struct vm_area_struct *vma)
 
 static const struct file_operations spc_fops = {
     .owner = THIS_MODULE,
+    .open = spc_open,
     .read = spc_read,
     .poll = spc_poll,
     .unlocked_ioctl = spc_ioctl,
@@ -243,7 +242,6 @@ static int spc_probe(struct platform_device *pdev)
     return 0;
 }
 
-// Void return type for modern platform drivers
 static void spc_remove(struct platform_device *pdev)
 {
     struct spc_dev *dev = g_spc;
@@ -253,7 +251,8 @@ static void spc_remove(struct platform_device *pdev)
 
 static const struct of_device_id spc_of_match[] = {
     {.compatible = "microchip,spc"},
-    {/* sentinel */}};
+    {/* sentinel */}
+};
 MODULE_DEVICE_TABLE(of, spc_of_match);
 
 static struct platform_driver spc_driver = {
