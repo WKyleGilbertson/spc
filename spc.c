@@ -59,7 +59,7 @@ static irqreturn_t spc_isr(int irq, void *dev_id)
         frame.ch[ch].il = (int32_t)ioread32(ch_base + OFF_IL);
         frame.ch[ch].ql = (int32_t)ioread32(ch_base + OFF_QL);
 
-uint32_t epoch_info = ioread32(ch_base + OFF_EPOCH_INFO);
+        uint32_t epoch_info = ioread32(ch_base + OFF_EPOCH_INFO);
         frame.ch[ch].epoch_idx = (uint16_t)(epoch_info & 0xFFFF);
         frame.ch[ch].epoch_cnt = (uint8_t)((epoch_info >> 16) & 0x03);
         frame.ch[ch].carrier_phase = ioread32(ch_base + OFF_CARR_PHASE);
@@ -71,7 +71,8 @@ uint32_t epoch_info = ioread32(ch_base + OFF_EPOCH_INFO);
 
     // Push into kfifo with spinlock protection (overwrite oldest if full)
     spin_lock_irqsave(&dev->fifo_lock, flags);
-    if (kfifo_is_full(&dev->fifo)) {
+    if (kfifo_is_full(&dev->fifo))
+    {
         struct spc_epoch_data dummy;
         int ret = kfifo_get(&dev->fifo, &dummy);
         (void)ret; // Silence warn_unused_result properly
@@ -251,8 +252,7 @@ static void spc_remove(struct platform_device *pdev)
 
 static const struct of_device_id spc_of_match[] = {
     {.compatible = "microchip,spc"},
-    {/* sentinel */}
-};
+    {/* sentinel */}};
 MODULE_DEVICE_TABLE(of, spc_of_match);
 
 static struct platform_driver spc_driver = {
