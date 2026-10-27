@@ -91,6 +91,7 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     struct spc_dev *dev = g_spc;
     channel_config_t cfg;
     channel_nco_update_t upd;
+    pps_config_t pps;
     void __iomem *ch_base;
 
     switch (cmd)
@@ -117,6 +118,23 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         iowrite32(upd.carr_freq, ch_base + 0x04);
         iowrite32(upd.code_freq, ch_base + 0x08);
         return 0;
+
+     case SPC_IOC_STEER_PPS:
+            if (copy_from_user(&pps, (void __user *)arg, sizeof(pps)))
+                return -EFAULT;
+            // Steer 1ms epoch threshold in spc_timebase (0x800) if within safe bounds (16360..16376)
+            if (pps.period_ticks >= 16360 && pps.period_ticks <= 16376) {
+                iowrite32(pps.period_ticks, dev->base + 0x800);
+            }
+            // Optional jam-sync of system_epoch counter to GPS TOW milliseconds
+            if (pps.trigger_jam) {
+                dev->epoch_counter = pps.jam_target_val;
+            }
+            return 0;
+
+     case SPC_IOC_RESET_TIMEBASE:
+            dev->epoch_counter = 0;
+            return 0;   
 
     default:
         return -ENOTTY;
