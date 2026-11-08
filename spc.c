@@ -32,6 +32,7 @@ struct spc_dev
     spinlock_t fifo_lock;
     wait_queue_head_t read_queue;
     uint32_t epoch_counter;
+    atomic_t open_count;
 };
 
 static struct spc_dev *g_spc;
@@ -122,12 +123,21 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
      case SPC_IOC_STEER_PPS:
             if (copy_from_user(&pps, (void __user *)arg, sizeof(pps)))
                 return -EFAULT;
-            // Steer 1ms epoch threshold in spc_timebase (0x800) if within safe bounds (16360..16376)
+            // 1. Steer 1ms epoch threshold in spc_timebase (0x800) if in 1ms range
             if (pps.period_ticks >= 16360 && pps.period_ticks <= 16376) {
                 iowrite32(pps.period_ticks, dev->base + 0x800);
             }
-            // Optional jam-sync of system_epoch counter to GPS TOW milliseconds
-            if (pps.trigger_jam) {
+            // 2. Steer 24-bit 1PPS generator in spc.v (0x810..0x81C) if in 1s range
+            if (pps.period_ticks >= 16360000 && pps.period_ticks <= 16376000) {
+                iowrite32(pps.period_ticks & 0xFFFFFF, dev->base + 0x810);
+                if (pps.pulse_width > 0) {
+                    iowrite32(pps.pulse_width & 0xFFFFFF, dev->base + 0x81C);
+                }
+                if (pps.trigger_jam) {
+                    iowrite32(pps.jam_target_val & 0xFFFFFF, dev->base + 0x814);
+                    iowrite32(1, dev->base + 0x818);
+                }
+            } else if (pps.trigger_jam) {
                 dev->epoch_counter = pps.jam_target_val;
             }
             return 0;
@@ -146,10 +156,20 @@ static int spc_open(struct inode *inode, struct file *file)
     struct spc_dev *dev = g_spc;
     unsigned long flags;
 
-    spin_lock_irqsave(&dev->fifo_lock, flags);
-    kfifo_reset(&dev->fifo);
-    spin_unlock_irqrestore(&dev->fifo_lock, flags);
+    // Only reset the kfifo when the first reader (l1iftrkd) opens /dev/spc
+    if (atomic_inc_return(&dev->open_count) == 1) {
+        spin_lock_irqsave(&dev->fifo_lock, flags);
+        kfifo_reset(&dev->fifo);
+        spin_unlock_irqrestore(&dev->fifo_lock, flags);
+    }
 
+    return 0;
+}
+
+static int spc_release(struct inode *inode, struct file *file)
+{
+    struct spc_dev *dev = g_spc;
+    atomic_dec(&dev->open_count);
     return 0;
 }
 
@@ -212,6 +232,7 @@ static int spc_mmap(struct file *file, struct vm_area_struct *vma)
 static const struct file_operations spc_fops = {
     .owner = THIS_MODULE,
     .open = spc_open,
+    .release = spc_release,
     .read = spc_read,
     .poll = spc_poll,
     .unlocked_ioctl = spc_ioctl,
@@ -240,6 +261,7 @@ static int spc_probe(struct platform_device *pdev)
     init_waitqueue_head(&dev->read_queue);
     spin_lock_init(&dev->fifo_lock);
     dev->epoch_counter = 0;
+    atomic_set(&dev->open_count, 0);
 
     dev->misc.minor = MISC_DYNAMIC_MINOR;
     dev->misc.name = DRIVER_NAME;
