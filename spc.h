@@ -101,7 +101,13 @@ typedef struct {
 
 #define SPC_IOC_CONFIG_CH      _IOW(SPC_IOC_MAGIC, 1, channel_config_t)
 #define SPC_IOC_UPDATE_NCO     _IOW(SPC_IOC_MAGIC, 2, channel_nco_update_t)
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+} __attribute__((packed)) spc_sys_time_t;
+
 #define SPC_IOC_STEER_PPS      _IOW(SPC_IOC_MAGIC, 3, pps_config_t)
 #define SPC_IOC_RESET_TIMEBASE _IO(SPC_IOC_MAGIC, 4)
+#define SPC_IOC_SET_SYS_TIME   _IOW(SPC_IOC_MAGIC, 5, spc_sys_time_t)
 
 #endif // _SPC_H

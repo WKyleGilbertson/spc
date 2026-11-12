@@ -9,6 +9,7 @@
 #include <linux/kfifo.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
+#include <linux/timekeeping.h>
 #include <linux/poll.h>
 #include <linux/mm.h>
 #include <linux/mod_devicetable.h>
@@ -144,7 +145,17 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
      case SPC_IOC_RESET_TIMEBASE:
             dev->epoch_counter = 0;
-            return 0;   
+            return 0;
+
+     case SPC_IOC_SET_SYS_TIME: {
+            spc_sys_time_t st;
+            struct timespec64 ts64;
+            if (copy_from_user(&st, (void __user *)arg, sizeof(st)))
+                return -EFAULT;
+            ts64.tv_sec  = st.tv_sec;
+            ts64.tv_nsec = st.tv_nsec;
+            return do_settimeofday64(&ts64);
+     }   
 
     default:
         return -ENOTTY;
