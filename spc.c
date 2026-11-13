@@ -1,3 +1,4 @@
+#include <linux/netdevice.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
@@ -289,6 +290,36 @@ static int spc_probe(struct platform_device *pdev)
         return ret;
     }
 
+
+
+    // Set GEM0 TSU increment & macb->tsu_incr for 50 MHz FIC_3_PCLK (20 ns/tick)
+    {
+        struct net_device *ndev = dev_get_by_name(&init_net, "eth0");
+        if (ndev) {
+            u32 *priv = (u32 *)netdev_priv(ndev);
+            int i;
+            for (i = 0; i < 4096; i++) {
+                if (priv[i] == 150000000U) {
+                    priv[i] = 50000000U;
+                    dev_info(&pdev->dev, "Updated eth0 macb->tsu_rate (offset +%d) to 50 MHz\n", i * 4);
+                }
+                // Match struct tsu_incr { u32 sub_ns = 11184810; u32 ns = 6; }
+                if (priv[i] == 11184810U && priv[i + 1] == 6U) {
+                    priv[i]     = 0U;  // sub_ns = 0
+                    priv[i + 1] = 20U; // ns = 20 (50 MHz)
+                    dev_info(&pdev->dev, "Updated eth0 macb->tsu_incr (offset +%d) to 20 ns\n", i * 4);
+                    break;
+                }
+            }
+            dev_put(ndev);
+        }
+        void __iomem *gem0 = ioremap(0x20110000, 0x1000);
+        if (gem0) {
+            iowrite32(0, gem0 + 0x1BC);  // TSU_TIMER_INCR_SUB_NSEC = 0
+            iowrite32(20, gem0 + 0x1DC); // TSU_TIMER_INCR = 20 ns (50 MHz)
+            iounmap(gem0);
+        }
+    }
     g_spc = dev;
     dev_info(&pdev->dev, "SPC harvester bound to IRQ %d, /dev/%s ready\n", dev->irq, DRIVER_NAME);
     return 0;
