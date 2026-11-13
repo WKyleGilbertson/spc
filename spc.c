@@ -35,6 +35,7 @@ struct spc_dev
     wait_queue_head_t read_queue;
     uint32_t epoch_counter;
     atomic_t open_count;
+    struct delayed_work tsu_disarm_work;
 };
 
 static struct spc_dev *g_spc;
@@ -89,6 +90,45 @@ static irqreturn_t spc_isr(int irq, void *dev_id)
     return IRQ_HANDLED;
 }
 
+static void spc_tsu_disarm_fn(struct work_struct *work)
+{
+    struct spc_dev *dev = container_of(to_delayed_work(work), struct spc_dev, tsu_disarm_work);
+    if (dev && dev->base) {
+        iowrite32(0x0, dev->base + 0x818);
+        dev_info(dev->misc.this_device, "GEM0 TSU hardware 1PPS jam-sync disarmed (free-run holdover)\n");
+    }
+}
+
+static void spc_ensure_gem0_50mhz(struct device *log_dev)
+{
+    struct net_device *ndev = dev_get_by_name(&init_net, "eth0");
+    void __iomem *gem0;
+
+    if (ndev) {
+        u32 *priv = (u32 *)netdev_priv(ndev);
+        int i;
+        for (i = 0; i < 4096; i++) {
+            if (priv[i] == 150000000U) {
+                priv[i] = 50000000U;
+                dev_info(log_dev, "Updated eth0 macb->tsu_rate (offset +%d) to 50 MHz\n", i * 4);
+            }
+            if (priv[i] == 11184810U && priv[i + 1] == 6U) {
+                priv[i]     = 0U;
+                priv[i + 1] = 20U;
+                dev_info(log_dev, "Updated eth0 macb->tsu_incr (offset +%d) to 20 ns\n", i * 4);
+                break;
+            }
+        }
+        dev_put(ndev);
+    }
+    gem0 = ioremap(0x20110000, 0x1000);
+    if (gem0) {
+        iowrite32(0, gem0 + 0x1BC);
+        iowrite32(20, gem0 + 0x1DC);
+        iounmap(gem0);
+    }
+}
+
 static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     struct spc_dev *dev = g_spc;
@@ -135,9 +175,11 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 if (pps.pulse_width > 0) {
                     iowrite32(pps.pulse_width & 0xFFFFFF, dev->base + 0x81C);
                 }
+                spc_ensure_gem0_50mhz(dev->misc.this_device);
                 if (pps.trigger_jam) {
                     iowrite32(pps.jam_target_val & 0xFFFFFF, dev->base + 0x814);
-                    iowrite32(1, dev->base + 0x818);
+                    iowrite32(0x3, dev->base + 0x818); // Bit 0: jam 1PPS, Bit 1: arm 1-shot GEM0 TSU clear
+                    mod_delayed_work(system_wq, &dev->tsu_disarm_work, msecs_to_jiffies(1100));
                 }
             } else if (pps.trigger_jam) {
                 dev->epoch_counter = pps.jam_target_val;
@@ -274,6 +316,7 @@ static int spc_probe(struct platform_device *pdev)
     spin_lock_init(&dev->fifo_lock);
     dev->epoch_counter = 0;
     atomic_set(&dev->open_count, 0);
+    INIT_DELAYED_WORK(&dev->tsu_disarm_work, spc_tsu_disarm_fn);
 
     dev->misc.minor = MISC_DYNAMIC_MINOR;
     dev->misc.name = DRIVER_NAME;
