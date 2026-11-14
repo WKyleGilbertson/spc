@@ -36,6 +36,17 @@ struct spc_dev
     uint32_t epoch_counter;
     atomic_t open_count;
     struct delayed_work tsu_disarm_work;
+    void __iomem *gem0;
+    u16 last_pps_cnt;
+    u16 latched_pps_cnt;
+    u16 processed_pps_cnt;
+    u32 latched_tsu_sec;
+    u32 latched_tsu_nsec;
+    s32 anchor_nsec;
+    s32 prev_err_ns;
+    bool has_prev_err;
+    bool gem0_50mhz_done;
+    s64 freq_int_subns_q8;
 };
 
 static struct spc_dev *g_spc;
@@ -70,6 +81,17 @@ static irqreturn_t spc_isr(int irq, void *dev_id)
         frame.ch[ch].data_ready = (uint8_t)((epoch_info >> 24) & 0xFF);
     }
 
+    // Check if 1PPS cycle_cnt (0x80C[15:0]) incremented on this 1ms sclk boundary
+    if (dev->gem0) {
+        u16 pps_cnt = (u16)(ioread32(dev->base + CLEAR_INTERRUPT_OFFSET) & 0xFFFFU);
+        if (pps_cnt != dev->last_pps_cnt) {
+            dev->latched_tsu_sec  = ioread32(dev->gem0 + 0x1D0);
+            dev->latched_tsu_nsec = ioread32(dev->gem0 + 0x1D4);
+            dev->last_pps_cnt     = pps_cnt;
+            dev->latched_pps_cnt  = pps_cnt;
+        }
+    }
+
     // Acknowledge interrupt in FPGA fabric
     iowrite32(CLEAR_INTERRUPT_VALUE, dev->base + CLEAR_INTERRUPT_OFFSET);
 
@@ -94,39 +116,82 @@ static void spc_tsu_disarm_fn(struct work_struct *work)
 {
     struct spc_dev *dev = container_of(to_delayed_work(work), struct spc_dev, tsu_disarm_work);
     if (dev && dev->base) {
-        iowrite32(0x0, dev->base + 0x818);
+        iowrite32(0x2, dev->base + 0x818);
         dev_info(dev->misc.this_device, "GEM0 TSU hardware 1PPS jam-sync disarmed (free-run holdover)\n");
     }
 }
 
-static void spc_ensure_gem0_50mhz(struct device *log_dev)
-{
-    struct net_device *ndev = dev_get_by_name(&init_net, "eth0");
-    void __iomem *gem0;
+#define NOMINAL_50_256MHZ_SUBNS (0LL) /* Keep TN slightly below 1e9 so only HW 1PPS pulse increments TSL */
 
-    if (ndev) {
+#define HW_SYNC_SUBNS (179516U)
+#define HW_SYNC_TISUBN (((HW_SYNC_SUBNS >> 8) & 0xFFFFU) | ((HW_SYNC_SUBNS & 0xFFU) << 24))
+
+static void spc_program_gem0_incr(void __iomem *gem0, s64 total_subns)
+{
+    iowrite32(HW_SYNC_TISUBN, gem0 + 0x1BC);
+    iowrite32(20, gem0 + 0x1DC);
+}
+
+static void spc_ensure_gem0_50mhz(struct spc_dev *dev)
+{
+    struct net_device *ndev;
+
+    if (dev->gem0_50mhz_done)
+        return;
+
+    ndev = dev_get_by_name(&init_net, "eth0");
+    if (!ndev)
+        return;
+
+    {
         u32 *priv = (u32 *)netdev_priv(ndev);
         int i;
         for (i = 0; i < 4096; i++) {
-            if (priv[i] == 150000000U) {
+            if (priv[i] == 150000000U || priv[i] == 50000000U)
                 priv[i] = 50000000U;
-                dev_info(log_dev, "Updated eth0 macb->tsu_rate (offset +%d) to 50 MHz\n", i * 4);
-            }
-            if (priv[i] == 11184810U && priv[i + 1] == 6U) {
+            if ((priv[i] == 11184810U && priv[i + 1] == 6U) || (priv[i] == 0U && priv[i + 1] == 20U)) {
                 priv[i]     = 0U;
                 priv[i + 1] = 20U;
-                dev_info(log_dev, "Updated eth0 macb->tsu_incr (offset +%d) to 20 ns\n", i * 4);
                 break;
             }
         }
         dev_put(ndev);
     }
-    gem0 = ioremap(0x20110000, 0x1000);
-    if (gem0) {
-        iowrite32(0, gem0 + 0x1BC);
-        iowrite32(20, gem0 + 0x1DC);
-        iounmap(gem0);
+    if (dev->gem0)
+        spc_program_gem0_incr(dev->gem0, 20LL << 24);
+    dev->gem0_50mhz_done = true;
+}
+
+static void spc_step_tsu_servo(struct spc_dev *dev)
+{
+    u16 pps_cnt;
+    u32 sec, nsec;
+    time64_t tai_sec;
+
+    if (!dev || !dev->gem0)
+        return;
+
+    // Enforce 20 ns increment and keep FPGA hardware 1PPS sync (0x818 bit 1) armed
+    iowrite32(HW_SYNC_TISUBN, dev->gem0 + 0x1BC);
+    iowrite32(20, dev->gem0 + 0x1DC);
+    iowrite32(0x2, dev->base + 0x818);
+
+    pps_cnt = dev->latched_pps_cnt;
+    if (pps_cnt == dev->processed_pps_cnt)
+        return;
+    dev->processed_pps_cnt = pps_cnt;
+
+    sec  = dev->latched_tsu_sec;
+    nsec = dev->latched_tsu_nsec;
+    tai_sec = (time64_t)((ktime_get_real_ns() + 500000000ULL) / 1000000000ULL) + 37;
+
+    if (sec != (u32)tai_sec) {
+        iowrite32((u32)tai_sec, dev->gem0 + 0x1D0);
+        sec = (u32)tai_sec;
     }
+
+    if ((sec % 60U) == 0U)
+        dev_info(dev->misc.this_device, "[PPS-TSU] HW-SYNC locked: sec=%u lat=%u ns\n", sec, nsec);
 }
 
 static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -175,11 +240,14 @@ static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 if (pps.pulse_width > 0) {
                     iowrite32(pps.pulse_width & 0xFFFFFF, dev->base + 0x81C);
                 }
-                spc_ensure_gem0_50mhz(dev->misc.this_device);
+                spc_ensure_gem0_50mhz(dev);
                 if (pps.trigger_jam) {
                     iowrite32(pps.jam_target_val & 0xFFFFFF, dev->base + 0x814);
                     iowrite32(0x3, dev->base + 0x818); // Bit 0: jam 1PPS, Bit 1: arm 1-shot GEM0 TSU clear
                     mod_delayed_work(system_wq, &dev->tsu_disarm_work, msecs_to_jiffies(1100));
+                    dev->has_prev_err = false;
+                } else {
+                    spc_step_tsu_servo(dev);
                 }
             } else if (pps.trigger_jam) {
                 dev->epoch_counter = pps.jam_target_val;
@@ -363,6 +431,7 @@ static int spc_probe(struct platform_device *pdev)
             iounmap(gem0);
         }
     }
+    dev->gem0 = ioremap(0x20110000, 0x1000);
     g_spc = dev;
     dev_info(&pdev->dev, "SPC harvester bound to IRQ %d, /dev/%s ready\n", dev->irq, DRIVER_NAME);
     return 0;
@@ -371,8 +440,12 @@ static int spc_probe(struct platform_device *pdev)
 static void spc_remove(struct platform_device *pdev)
 {
     struct spc_dev *dev = g_spc;
-    if (dev)
+    if (dev) {
+        cancel_delayed_work_sync(&dev->tsu_disarm_work);
+        if (dev->gem0)
+            iounmap(dev->gem0);
         misc_deregister(&dev->misc);
+    }
 }
 
 static const struct of_device_id spc_of_match[] = {
