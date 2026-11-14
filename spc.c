@@ -367,6 +367,9 @@ static int spc_probe(struct platform_device *pdev)
     struct spc_dev *dev;
     int ret;
 
+    //dev_info(dev, "spc driver loaded (version: %s, built: %s)\n", GIT_REV, BUILD_TIME);
+    //dev_info(dev, "spc driver loaded (version: %s, built: %s)\n", GIT_CI, BUILD_TIMESTAMP);
+
     dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
     if (!dev)
         return -ENOMEM;
@@ -400,8 +403,6 @@ static int spc_probe(struct platform_device *pdev)
         misc_deregister(&dev->misc);
         return ret;
     }
-
-
 
     // Set GEM0 TSU increment & macb->tsu_incr for 50 MHz FIC_3_PCLK (20 ns/tick)
     {
@@ -463,6 +464,25 @@ static struct platform_driver spc_driver = {
 };
 
 module_platform_driver(spc_driver);
+
+#ifndef GIT_REV
+#define GIT_REV "unknown"
+#endif
+#ifndef GIT_CI
+#define GIT_CI "unknown"
+#endif
+#ifndef BUILD_TIME
+#define BUILD_TIME "unknown"
+#endif
+#ifndef BUILD_TIMESTAMP
+#define BUILD_TIMESTAMP "unknown"
+#endif
+MODULE_VERSION(GIT_CI);
+MODULE_INFO(git_rev, GIT_CI);
+MODULE_INFO(build_time, BUILD_TIMESTAMP);
+//MODULE_VERSION(GIT_REV);
+//MODULE_INFO(git_ci, GIT_REV);
+//MODULE_INFO(build_time, BUILD_TIME);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("W. Kyle Gilbertson");

@@ -6,6 +6,10 @@ KVER := $(shell uname -r)
 CC := gcc
 CFLAGS := -O2
 
+#GIT_REV := $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
+#BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+#ccflags-y += -DGIT_REV=\"$(GIT_REV)\" -DBUILD_TIME=\"$(BUILD_TIME)\"
 # Safely query Git hash or fallback without stderr noise
 GIT_CI := $(shell git -C $(MODULE_DIR) rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_TIMESTAMP := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
