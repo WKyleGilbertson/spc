@@ -14,6 +14,7 @@
 #include <linux/poll.h>
 #include <linux/mm.h>
 #include <linux/mod_devicetable.h>
+#include <linux/of.h>
 
 #include "spc.h"
 
@@ -368,7 +369,19 @@ static int spc_probe(struct platform_device *pdev)
     int ret;
 
     //dev_info(dev, "spc driver loaded (version: %s, built: %s)\n", GIT_REV, BUILD_TIME);
-    dev_info(&pdev->dev, "spc driver loaded (version: %s, built: %s)\n", GIT_CI, BUILD_TIMESTAMP);
+    {
+        struct device_node *ov_np = of_find_node_by_path("/chosen/overlays");
+        const char *gw_ver = "unknown";
+        if (ov_np) {
+            if (of_property_read_string(ov_np, "L1IF-CAPE-GATEWARE", &gw_ver) < 0) {
+                if (of_property_read_string(ov_np, "DEFAULT-CAPE-GATEWARE", &gw_ver) < 0)
+                    of_property_read_string(ov_np, "DEFAULT-BASE", &gw_ver);
+            }
+            of_node_put(ov_np);
+        }
+        dev_info(&pdev->dev, "spc driver loaded (drv_git: %s, gw_git: %s, built: %s)\n",
+                 GIT_CI, gw_ver, BUILD_TIMESTAMP);
+    }
 
     dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
     if (!dev)
