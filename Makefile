@@ -1,5 +1,5 @@
 KER ?= /home/beagle/lab/kernel/BeagleV-Fire-ubuntu/linux/
-MODULE_DIR := $(shell pwd)
+MODULE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 KVER := $(shell uname -r)
 
 # User-space compiler settings
