@@ -368,7 +368,7 @@ static int spc_probe(struct platform_device *pdev)
     int ret;
 
     //dev_info(dev, "spc driver loaded (version: %s, built: %s)\n", GIT_REV, BUILD_TIME);
-    //dev_info(dev, "spc driver loaded (version: %s, built: %s)\n", GIT_CI, BUILD_TIMESTAMP);
+    dev_info(&pdev->dev, "spc driver loaded (version: %s, built: %s)\n", GIT_CI, BUILD_TIMESTAMP);
 
     dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
     if (!dev)
