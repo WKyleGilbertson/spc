@@ -1,23 +1,21 @@
 KER ?= /home/beagle/lab/kernel/BeagleV-Fire-ubuntu/linux/
-MODULE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 KVER := $(shell uname -r)
 
 # User-space compiler settings
 CC := gcc
 CFLAGS := -O2
 
-#GIT_REV := $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
-#BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-#ccflags-y += -DGIT_REV=\"$(GIT_REV)\" -DBUILD_TIME=\"$(BUILD_TIME)\"
-# Safely query Git hash or fallback without stderr noise
-GIT_CI := $(shell git -C $(MODULE_DIR) rev-parse HEAD 2>/dev/null || echo "unknown")
-BUILD_TIMESTAMP := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+ifeq ($(KERNELRELEASE),)
+MODULE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+GIT_HASH := $(shell git -C $(MODULE_DIR) rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_DIRTY := $(shell git -C $(MODULE_DIR) diff --quiet HEAD -- spc.c spc.h Makefile 2>/dev/null || echo "-dirty")
+export GIT_CI := $(GIT_HASH)$(GIT_DIRTY)
+export BUILD_TIMESTAMP := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+endif
 
 ccflags-y += -DGIT_CI=\"$(GIT_CI)\"
 ccflags-y += -DBUILD_TIMESTAMP=\"$(BUILD_TIMESTAMP)\"
 
-# Default target builds the kernel module and then the user-space applications
 all: modules apps
 
 modules:
