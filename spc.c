@@ -124,7 +124,7 @@ static void spc_tsu_disarm_fn(struct work_struct *work)
 
 #define NOMINAL_50_256MHZ_SUBNS (0LL) /* Keep TN slightly below 1e9 so only HW 1PPS pulse increments TSL */
 
-#define HW_SYNC_SUBNS (179516U)
+#define HW_SYNC_SUBNS (193500U)
 #define HW_SYNC_TISUBN (((HW_SYNC_SUBNS >> 8) & 0xFFFFU) | ((HW_SYNC_SUBNS & 0xFFU) << 24))
 
 static void spc_program_gem0_incr(void __iomem *gem0, s64 total_subns)
@@ -186,10 +186,11 @@ static void spc_step_tsu_servo(struct spc_dev *dev)
     nsec = dev->latched_tsu_nsec;
     tai_sec = (time64_t)((ktime_get_real_ns() + 500000000ULL) / 1000000000ULL) + 37;
 
+    /*
     if (sec != (u32)tai_sec) {
         iowrite32((u32)tai_sec, dev->gem0 + 0x1D0);
         sec = (u32)tai_sec;
-    }
+    } */
 
     if ((sec % 60U) == 0U)
         dev_info(dev->misc.this_device, "[PPS-TSU] HW-SYNC locked: sec=%u lat=%u ns\n", sec, nsec);
