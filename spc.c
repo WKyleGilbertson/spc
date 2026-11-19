@@ -124,7 +124,7 @@ static void spc_tsu_disarm_fn(struct work_struct *work)
     }
 }
 
-#define HW_SYNC_SUBNS (185000U)
+#define HW_SYNC_SUBNS (145000U)
 
 static inline u32 spc_pack_tisubn(u32 subns)
 {
@@ -188,7 +188,7 @@ static void spc_step_tsu_servo(struct spc_dev *dev)
             live_sec = ioread32(dev->gem0 + 0x1D0);
             if (live_sec != (u32)tai_sec) {
                 iowrite32((u32)tai_sec, dev->gem0 + 0x1D0);
-                dev->prev_tsu_sec = 0; // Skip double-inc check across our own step
+                dev->prev_tsu_sec = (u32)tai_sec;
                 dev_info(dev->misc.this_device, "[PPS-TSU] Aligned TSL to TAI: %u -> %u (TN=%u ns)\n",
                          live_sec, (u32)tai_sec, live_tn);
             }
