@@ -124,7 +124,7 @@ static void spc_tsu_disarm_fn(struct work_struct *work)
     }
 }
 
-#define HW_SYNC_TOTAL_SUBNS ((20LL << 24) - 1720000LL) /* ~19.8975 ns/tick for 50.256 MHz FIC_3_PCLK */
+#define HW_SYNC_TOTAL_SUBNS ((20LL << 24) - 70000LL) /* ns=19, subns=16707216 (safe margin) */
 
 static void spc_program_gem0_incr(void __iomem *gem0, s64 total_subns)
 {
