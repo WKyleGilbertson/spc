@@ -48,6 +48,8 @@ struct spc_dev
     bool has_prev_err;
     bool gem0_50mhz_done;
     s64 freq_int_subns_q8;
+    u32 prev_tsu_sec;
+    u32 hw_sync_subns;
 };
 
 static struct spc_dev *g_spc;
@@ -122,14 +124,16 @@ static void spc_tsu_disarm_fn(struct work_struct *work)
     }
 }
 
-#define NOMINAL_50_256MHZ_SUBNS (0LL) /* Keep TN slightly below 1e9 so only HW 1PPS pulse increments TSL */
+#define HW_SYNC_SUBNS (185000U)
 
-#define HW_SYNC_SUBNS (193500U)
-#define HW_SYNC_TISUBN (((HW_SYNC_SUBNS >> 8) & 0xFFFFU) | ((HW_SYNC_SUBNS & 0xFFU) << 24))
-
-static void spc_program_gem0_incr(void __iomem *gem0, s64 total_subns)
+static inline u32 spc_pack_tisubn(u32 subns)
 {
-    iowrite32(HW_SYNC_TISUBN, gem0 + 0x1BC);
+    return ((subns >> 8) & 0xFFFFU) | ((subns & 0xFFU) << 24);
+}
+
+static void spc_program_gem0_incr(void __iomem *gem0, u32 subns)
+{
+    iowrite32(spc_pack_tisubn(subns), gem0 + 0x1BC);
     iowrite32(20, gem0 + 0x1DC);
 }
 
@@ -159,41 +163,60 @@ static void spc_ensure_gem0_50mhz(struct spc_dev *dev)
         dev_put(ndev);
     }
     if (dev->gem0)
-        spc_program_gem0_incr(dev->gem0, 20LL << 24);
+        spc_program_gem0_incr(dev->gem0, dev->hw_sync_subns);
     dev->gem0_50mhz_done = true;
 }
 
 static void spc_step_tsu_servo(struct spc_dev *dev)
 {
-    u16 pps_cnt;
-    u32 sec, nsec;
+    u16 pps_cnt, pps_delta;
+    u32 sec, nsec, live_tn, live_sec;
     time64_t tai_sec;
 
     if (!dev || !dev->gem0)
         return;
 
-    // Enforce 20 ns increment and keep FPGA hardware 1PPS sync (0x818 bit 1) armed
-    iowrite32(HW_SYNC_TISUBN, dev->gem0 + 0x1BC);
-    iowrite32(20, dev->gem0 + 0x1DC);
+    // Enforce 20 ns + subns increment and keep FPGA hardware 1PPS sync (0x818 bit 1) armed
+    spc_program_gem0_incr(dev->gem0, dev->hw_sync_subns);
     iowrite32(0x2, dev->base + 0x818);
+
+    // Safe mid-second TAI alignment (100 ms < TN < 800 ms prevents rollover tear)
+    live_tn = ioread32(dev->gem0 + 0x1D4);
+    if (live_tn > 100000000U && live_tn < 800000000U) {
+        tai_sec = ktime_get_real_seconds() + 37;
+        if (tai_sec > 1700000000LL) {
+            live_sec = ioread32(dev->gem0 + 0x1D0);
+            if (live_sec != (u32)tai_sec) {
+                iowrite32((u32)tai_sec, dev->gem0 + 0x1D0);
+                dev->prev_tsu_sec = 0; // Skip double-inc check across our own step
+                dev_info(dev->misc.this_device, "[PPS-TSU] Aligned TSL to TAI: %u -> %u (TN=%u ns)\n",
+                         live_sec, (u32)tai_sec, live_tn);
+            }
+        }
+    }
 
     pps_cnt = dev->latched_pps_cnt;
     if (pps_cnt == dev->processed_pps_cnt)
         return;
+    pps_delta = (u16)(pps_cnt - dev->processed_pps_cnt);
     dev->processed_pps_cnt = pps_cnt;
 
     sec  = dev->latched_tsu_sec;
     nsec = dev->latched_tsu_nsec;
-    tai_sec = (time64_t)((ktime_get_real_ns() + 500000000ULL) / 1000000000ULL) + 37;
 
-    /*
-    if (sec != (u32)tai_sec) {
-        iowrite32((u32)tai_sec, dev->gem0 + 0x1D0);
-        sec = (u32)tai_sec;
-    } */
+    // Runtime guard: if TN ever self-rolls over before 1PPS, back off subns immediately
+    if (dev->prev_tsu_sec != 0 && pps_delta == 1 && (sec - dev->prev_tsu_sec) >= 2) {
+        if (dev->hw_sync_subns > 10000U)
+            dev->hw_sync_subns -= 2000U;
+        spc_program_gem0_incr(dev->gem0, dev->hw_sync_subns);
+        dev_info(dev->misc.this_device, "[PPS-TSU] Double-inc (%u->%u), backed off subns=%u\n",
+                 dev->prev_tsu_sec, sec, dev->hw_sync_subns);
+    }
+    dev->prev_tsu_sec = sec;
 
     if ((sec % 60U) == 0U)
-        dev_info(dev->misc.this_device, "[PPS-TSU] HW-SYNC locked: sec=%u lat=%u ns\n", sec, nsec);
+        dev_info(dev->misc.this_device, "[PPS-TSU] HW-SYNC locked: sec=%u lat=%u ns subns=%u\n",
+                 sec, nsec, dev->hw_sync_subns);
 }
 
 static long spc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -400,6 +423,7 @@ static int spc_probe(struct platform_device *pdev)
     init_waitqueue_head(&dev->read_queue);
     spin_lock_init(&dev->fifo_lock);
     dev->epoch_counter = 0;
+    dev->hw_sync_subns = HW_SYNC_SUBNS;
     atomic_set(&dev->open_count, 0);
     INIT_DELAYED_WORK(&dev->tsu_disarm_work, spc_tsu_disarm_fn);
 
